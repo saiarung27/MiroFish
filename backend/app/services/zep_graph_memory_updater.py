@@ -16,6 +16,7 @@ from ..utils.locale import get_locale, set_locale
 from ..utils.zep import (
     ZEP_INGESTION_WAIT_TIMEOUT_SECONDS,
     call_zep_read_with_retry,
+    get_memory_backend,
     get_zep_client,
 )
 
@@ -257,7 +258,7 @@ class ZepGraphMemoryUpdater:
         self.simulation_id = simulation_id or "unknown"
         self.api_key = api_key or Config.ZEP_API_KEY
         
-        if not self.api_key:
+        if not self.api_key and get_memory_backend() != "reify":
             raise ValueError("ZEP_API_KEY未配置")
         
         self.client = get_zep_client(self.api_key)

@@ -30,6 +30,23 @@ MAX_ZEP_SEARCH_QUERY_CHARS = 400
 MAX_ZEP_SEARCH_RESULTS = 50
 
 
+def get_memory_backend() -> str:
+    """Return the selected graph backend: 'zep' (default) or 'reify'.
+
+    ``MIROFISH_MEMORY_BACKEND=reify`` routes every service through the
+    local Reify-backed client instead of Zep Cloud. Any other value
+    besides 'zep'/'reify' is a configuration error, not a silent
+    fallback to Cloud.
+    """
+
+    backend = os.environ.get("MIROFISH_MEMORY_BACKEND", "zep").strip().lower()
+    if backend not in {"zep", "reify"}:
+        raise ValueError(
+            f"MIROFISH_MEMORY_BACKEND must be 'zep' or 'reify', got {backend!r}"
+        )
+    return backend
+
+
 def normalize_zep_search_query(query: Any) -> str:
     """Return a non-empty query within Zep Cloud's endpoint limit."""
 
@@ -62,8 +79,17 @@ def _cached_zep_client(api_key: str, timeout: float) -> Zep:
     )
 
 
-def get_zep_client(api_key: str | None = None, timeout: float | None = None) -> Zep:
-    """Return a process-shared, explicitly configured Zep Cloud client."""
+def get_zep_client(api_key: str | None = None, timeout: float | None = None):
+    """Return a process-shared graph client (Zep Cloud, or Reify local).
+
+    With ``MIROFISH_MEMORY_BACKEND=reify`` this returns the Reify-backed
+    client and no API key is needed; the Zep Cloud path is unchanged.
+    """
+
+    if get_memory_backend() == "reify":
+        from .reify_zep_client import create_reify_client
+
+        return create_reify_client()
 
     # zep-cloud gives ZEP_API_URL precedence even when base_url is explicit.
     # Reject it so this Cloud-only integration cannot silently target a
