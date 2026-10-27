@@ -18,7 +18,7 @@ from datetime import datetime
 from openai import OpenAI
 from ..config import Config
 from ..utils.logger import get_logger
-from ..utils.locale import get_language_instruction, get_locale, set_locale, t
+from ..utils.locale import get_language_instruction, set_locale, t
 from ..utils.openai_chat_compat import create_chat_completion, extract_chat_completion_text
 from ..utils.zep import (
     call_zep_read_with_retry,
@@ -961,8 +961,13 @@ class OasisProfileGenerator:
                 except Exception as e:
                     logger.warning(f"实时保存 profiles 失败: {e}")
         
-        # Capture locale before spawning thread pool workers
-        current_locale = get_locale()
+        # Personas are always generated in English: simulation posts
+        # inherit persona language, and report quote grounding requires
+        # sim content and report language to match. Forcing 'en' here
+        # (rather than the request locale) is what makes the grounding
+        # gate's verbatim matching possible. This deliberately changes
+        # behavior for non-English UI users; grounding outranks locale.
+        current_locale = 'en'
 
         def generate_single_profile(idx: int, entity: EntityNode) -> tuple:
             """生成单个profile的工作函数"""

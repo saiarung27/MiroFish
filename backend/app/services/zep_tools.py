@@ -404,15 +404,60 @@ class InterviewResult:
         return "\n".join(text_parts)
 
 
+@dataclass
+class SimPostsResult:
+    """Simulation posts/comments read straight from the OASIS platform DB.
+
+    This is the report's behavioral evidence: what agents actually did
+    and said during the run. Graph searches only see the brief (the
+    input); interviews need a live environment (reports run after the
+    run stops). Without this tool, a report has no behavioral source
+    at all -- which is how the Telegram E2E report invented quotes.
+    """
+
+    simulation_id: str
+    posts: List[Dict[str, Any]] = field(default_factory=list)
+    comments: List[Dict[str, Any]] = field(default_factory=list)
+
+    def texts(self) -> List[str]:
+        """Post + comment contents for the grounding gate."""
+        out = [p.get("content", "") for p in self.posts]
+        out += [c.get("content", "") for c in self.comments]
+        return [t for t in out if t]
+
+    def to_text(self) -> str:
+        parts = [
+            f"Simulation posts for {self.simulation_id}: "
+            f"{len(self.posts)} posts, {len(self.comments)} comments. "
+            "Quote ONLY from the posts below, verbatim. If a claim is "
+            "not in these posts, say the simulation shows no evidence "
+            "for it instead of inventing a quote or number.",
+        ]
+        for p in self.posts:
+            parts.append(
+                f"[post #{p.get('post_id')} by {p.get('author', 'unknown')}]: "
+                f"{p.get('content', '')}"
+            )
+        for c in self.comments:
+            parts.append(
+                f"[comment on post #{c.get('post_id')} by "
+                f"{c.get('author', 'unknown')}]: {c.get('content', '')}"
+            )
+        if not self.posts and not self.comments:
+            parts.append("(no posts or comments recorded in this run)")
+        return "\n".join(parts)
+
+
 class ZepToolsService:
     """
     Zep检索工具服务
-    
+
     【核心检索工具 - 优化后】
     1. insight_forge - 深度洞察检索（最强大，自动生成子问题，多维度检索）
     2. panorama_search - 广度搜索（获取全貌，包括过期内容）
     3. quick_search - 简单搜索（快速检索）
     4. interview_agents - 深度采访（采访模拟Agent，获取多视角观点）
+    5. sim_posts - 模拟实录（直接读取模拟数据库中的帖子/评论）
     
     【基础工具】
     - search_graph - 图谱语义搜索
@@ -1479,7 +1524,87 @@ class ZepToolsService:
         
         logger.info(t("console.interviewAgentsComplete", count=result.interviewed_count))
         return result
-    
+
+    def get_sim_posts(
+        self,
+        simulation_id: str,
+        limit: int = 200,
+        base_dir: Optional[str] = None,
+    ) -> SimPostsResult:
+        """Read what agents actually posted during the run.
+
+        Opens the OASIS platform DB (twitter_simulation.db, plus
+        reddit_simulation.db when present) READ-ONLY and returns posts
+        and comments with authors. This is the report's behavioral
+        evidence: graph tools only see the brief, and interviews need a
+        live environment that is already closed by report time. A
+        missing DB yields an empty result (not an exception) so the
+        grounding gate treats the report as having no behavioral
+        evidence instead of crashing.
+
+        ``base_dir`` overrides the simulations root (tests use a tmp
+        dir); otherwise it follows the usual uploads/simulations path.
+        """
+        import os
+        import re
+        import sqlite3
+
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_\-]*", simulation_id):
+            return SimPostsResult(simulation_id=simulation_id)
+        root = base_dir or os.path.join(
+            os.path.dirname(__file__), "../../uploads/simulations"
+        )
+        sim_dir = os.path.join(root, simulation_id)
+        result = SimPostsResult(simulation_id=simulation_id)
+        for db_name, platform in (
+            ("twitter_simulation.db", "twitter"),
+            ("reddit_simulation.db", "reddit"),
+        ):
+            db_path = os.path.join(sim_dir, db_name)
+            if not os.path.exists(db_path):
+                continue
+            try:
+                conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+                try:
+                    users = {
+                        r[0]: (r[1] or f"user_{r[0]}")
+                        for r in conn.execute(
+                            "SELECT user_id, name FROM user"
+                        ).fetchall()
+                    }
+                    for row in conn.execute(
+                        "SELECT post_id, user_id, content FROM post "
+                        "ORDER BY post_id LIMIT ?",
+                        (limit,),
+                    ).fetchall():
+                        content = row[2] or ""
+                        if content.strip():
+                            result.posts.append({
+                                "post_id": row[0],
+                                "author": users.get(row[1], f"user_{row[1]}"),
+                                "platform": platform,
+                                "content": content,
+                            })
+                    for row in conn.execute(
+                        "SELECT comment_id, post_id, user_id, content "
+                        "FROM comment ORDER BY comment_id LIMIT ?",
+                        (limit,),
+                    ).fetchall():
+                        content = row[3] or ""
+                        if content.strip():
+                            result.comments.append({
+                                "comment_id": row[0],
+                                "post_id": row[1],
+                                "author": users.get(row[2], f"user_{row[2]}"),
+                                "platform": platform,
+                                "content": content,
+                            })
+                finally:
+                    conn.close()
+            except Exception as e:
+                logger.warning(f"sim_posts read failed for {db_path}: {e}")
+        return result
+
     @staticmethod
     def _clean_tool_call_response(response: str) -> str:
         """清理 Agent 回复中的 JSON 工具调用包裹，提取实际内容"""

@@ -21,7 +21,8 @@ from enum import Enum
 from ..config import Config
 from ..utils.llm_client import LLMClient
 from ..utils.logger import get_logger
-from ..utils.locale import get_language_instruction, t
+from ..utils.locale import get_language_instruction, set_locale, t
+from .report_grounding import strip_unverified, verify_report
 from .zep_tools import (
     ZepToolsService, 
     SearchResult, 
@@ -451,7 +452,10 @@ class Report:
     created_at: str = ""
     completed_at: str = ""
     error: Optional[str] = None
-    
+    # Mechanical grounding gate result (see report_grounding.py):
+    # verdict is "grounded", "grounded_after_stripping" or "ungrounded".
+    grounding: Optional[Dict[str, Any]] = None
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "report_id": self.report_id,
@@ -463,7 +467,8 @@ class Report:
             "markdown_content": self.markdown_content,
             "created_at": self.created_at,
             "completed_at": self.completed_at,
-            "error": self.error
+            "error": self.error,
+            "grounding": self.grounding
         }
 
 
@@ -546,6 +551,26 @@ TOOL_DESC_INTERVIEW_AGENTS = """\
 - 采访摘要和观点对比
 
 【重要】需要OASIS模拟环境正在运行才能使用此功能！"""
+
+TOOL_DESC_SIM_POSTS = """\
+【模拟实录 - Agent真实帖子与评论（行为证据）】
+直接读取模拟数据库中Agent在运行期间实际发布的帖子和评论。
+这是报告中所有"用户说/用户认为/用户愿意"类主张的唯一可信来源：
+图谱工具只包含注入的模拟需求（输入），采访工具需要仍在运行的
+模拟环境（报告生成时已关闭）。没有本工具的输出，就没有行为证据。
+
+【使用场景】
+- 章节需要引用Agent的原话或描述Agent的反应时，先调用本工具
+- 判断某个观点是否真实出现过，而不是凭空推断
+- 报告中的每个引言和每个用户归因的数字必须来自这里
+
+【返回内容】
+- 帖子与评论的原文、作者、编号
+- 无帖子时明确说明该次运行没有行为记录
+
+【重要】引用时必须逐字照抄原文，禁止改写、翻译或续写；
+报告中出现的引言和用户归因数字若不在本工具输出中，将在保存前
+被自动删除。"""
 
 # ── 大纲规划 prompt ──
 
@@ -652,11 +677,11 @@ SECTION_SYSTEM_PROMPT_TEMPLATE = """\
      > "某类人群会表示：原文内容..."
    - 这些引用是模拟预测的核心证据
 
-3. 【语言一致性 - 引用内容必须翻译为报告语言】
-   - 工具返回的内容可能包含与报告语言不同的表述
-   - 报告必须全部使用与用户指定语言一致的语言撰写
-   - 当你引用工具返回的其他语言内容时，必须将其翻译为报告语言后再写入
-   - 翻译时保持原意不变，确保表述自然通顺
+3. 【语言一致性 - 报告语言为英语，引用必须逐字照抄】
+   - 整个报告必须用英语撰写（模拟内容与报告均为英语）
+   - 引用 sim_posts 返回的帖子/评论时，必须逐字照抄原文：
+     禁止翻译、改写、续写或"润色"引言——逐字照抄是证据，
+     改写后的引言在保存前会被自动删除
    - 这一规则同时适用于正文和引用块（> 格式）中的内容
 
 4. 【忠实呈现预测结果】
@@ -669,6 +694,12 @@ SECTION_SYSTEM_PROMPT_TEMPLATE = """\
    - ❌ 禁止在回复中包含 <tool_result> 块 — 只有系统会提供工具结果
    - ✅ 只能引用真实出现在工具结果中的实体、引用和数据
    - 如果工具结果中没有相关内容，应如实说明，而非编造
+   - ⚠️ 行为主张（用户说了什么、用户愿意付多少钱）只能来自 sim_posts
+     工具的输出：图谱工具返回的是注入的模拟需求（输入），不是
+     Agent 的行为；采访工具在报告生成时已不可用（模拟环境已关闭）
+   - ⚠️ 报告保存前会经过机械核验：任何不在 sim_posts 输出中的引言
+     或用户归因数字都会被删除；没有任何行为证据支撑的报告会被
+     标记为 ungrounded，不得用于决策
 
 ═══════════════════════════════════════════════════════════════
 【⚠️ 格式规范 - 极其重要！】
@@ -715,10 +746,11 @@ SECTION_SYSTEM_PROMPT_TEMPLATE = """\
 {tools_description}
 
 【工具使用建议 - 请混合使用不同工具，不要只用一种】
+- sim_posts: 行为证据优先——每个章节第一次调用它，获取Agent实际发布的帖子/评论；章节中所有引言和用户归因数字必须来自它的输出
 - insight_forge: 深度洞察分析，自动分解问题并多维度检索事实和关系
 - panorama_search: 广角全景搜索，了解事件全貌、时间线和演变过程
 - quick_search: 快速验证某个具体信息点
-- interview_agents: 采访模拟Agent，获取不同角色的第一人称观点和真实反应
+- interview_agents: 采访模拟Agent，获取不同角色的第一人称观点和真实反应（仅在模拟环境仍在运行时可用；报告生成时通常已关闭）
 
 ═══════════════════════════════════════════════════════════════
 【工作流程】
@@ -956,6 +988,13 @@ class ReportAgent:
                     "interview_topic": "采访主题或需求描述（如：'了解学生对宿舍甲醛事件的看法'）",
                     "max_agents": "最多采访的Agent数量（可选，默认5，最大10）"
                 }
+            },
+            "sim_posts": {
+                "name": "sim_posts",
+                "description": TOOL_DESC_SIM_POSTS,
+                "parameters": {
+                    "limit": "返回的帖子/评论数量上限（可选，默认200）"
+                }
             }
         }
     
@@ -1025,6 +1064,17 @@ class ReportAgent:
                     max_agents=max_agents
                 )
                 return result.to_text()
+
+            elif tool_name == "sim_posts":
+                # 模拟实录 - 直接读取模拟数据库的帖子/评论（行为证据）
+                limit = parameters.get("limit", 200)
+                if isinstance(limit, str):
+                    limit = int(limit)
+                result = self.zep_tools.get_sim_posts(
+                    simulation_id=self.simulation_id,
+                    limit=limit
+                )
+                return result.to_text()
             
             # ========== 向后兼容的旧工具（内部重定向到新工具） ==========
             
@@ -1061,14 +1111,14 @@ class ReportAgent:
                 return json.dumps(result, ensure_ascii=False, indent=2)
             
             else:
-                return f"未知工具: {tool_name}。请使用以下工具之一: insight_forge, panorama_search, quick_search"
+                return f"未知工具: {tool_name}。请使用以下工具之一: insight_forge, panorama_search, quick_search, interview_agents, sim_posts"
                 
         except Exception as e:
             logger.error(t('report.toolExecFailed', toolName=tool_name, error=str(e)))
             return f"工具执行失败: {str(e)}"
     
     # 合法的工具名称集合，用于裸 JSON 兜底解析时校验
-    VALID_TOOL_NAMES = {"insight_forge", "panorama_search", "quick_search", "interview_agents"}
+    VALID_TOOL_NAMES = {"insight_forge", "panorama_search", "quick_search", "interview_agents", "sim_posts"}
 
     def _parse_tool_calls(self, response: str) -> List[Dict[str, Any]]:
         """
@@ -1299,6 +1349,17 @@ class ReportAgent:
             tools_description=self._get_tools_description(),
         )
         system_prompt = f"{system_prompt}\n\n{get_language_instruction()}"
+        # English is forced end to end (report thread + sim personas):
+        # verbatim quote grounding requires sim and report languages to
+        # match, and the old Chinese report could not be checked against
+        # English sim content. This belt-and-braces line holds even if
+        # the locale plumbing above ever changes.
+        system_prompt = (
+            f"{system_prompt}\n\n"
+            "Write the entire report in English. Quote simulation posts "
+            "verbatim, in English, exactly as the sim_posts tool returned "
+            "them."
+        )
 
         # 构建用户prompt - 每个已完成章节各传入最大4000字
         if previous_sections:
@@ -1327,7 +1388,7 @@ class ReportAgent:
         min_tool_calls = 3  # 最少工具调用次数
         conflict_retries = 0  # 工具调用与Final Answer同时出现的连续冲突次数
         used_tools = set()  # 记录已调用过的工具名
-        all_tools = {"insight_forge", "panorama_search", "quick_search", "interview_agents"}
+        all_tools = {"insight_forge", "panorama_search", "quick_search", "interview_agents", "sim_posts"}
 
         # 报告上下文，用于InsightForge的子问题生成
         report_context = f"章节标题: {section.title}\n模拟需求: {self.simulation_requirement}"
@@ -1600,7 +1661,12 @@ class ReportAgent:
             Report: 完整报告
         """
         import uuid
-        
+
+        # Reports are English end to end: verbatim quote grounding needs
+        # the report language to match the simulation content language.
+        # (Personas are likewise forced to English at generation time.)
+        set_locale('en')
+
         # 如果没有传入 report_id，则自动生成
         if not report_id:
             report_id = f"report_{uuid.uuid4().hex[:12]}"
@@ -1749,6 +1815,39 @@ class ReportAgent:
             
             # 使用ReportManager组装完整报告
             report.markdown_content = ReportManager.assemble_full_report(report_id, outline)
+
+            # 阶段3b: 机械核验 (grounding gate) —— 在保存之前，删除任何
+            # 不在行为证据中的引言和用户归因数字。采访在报告生成时已
+            # 不可用（模拟环境已关闭），因此行为证据 = 模拟数据库帖子/评论。
+            # 缺少数据库时行为证据为空，报告将被标记为 ungrounded（诚实）
+            # 而不是带着编造的引言保存。
+            try:
+                sim_posts = self.zep_tools.get_sim_posts(
+                    simulation_id=self.simulation_id
+                )
+                grounding = verify_report(
+                    report.markdown_content,
+                    behavior_texts=sim_posts.texts(),
+                    brief_texts=[self.simulation_requirement],
+                )
+                report.markdown_content = strip_unverified(
+                    report.markdown_content, grounding
+                )
+                report.grounding = grounding.to_dict()
+                logger.info(
+                    "report grounding: verdict=%s quotes=%d/%d numbers=%d/%d",
+                    grounding.verdict,
+                    grounding.quotes_verified, grounding.quotes_checked,
+                    grounding.numbers_verified, grounding.numbers_checked,
+                )
+            except Exception as gate_error:
+                # 核验本身失败时不阻塞报告，但必须显式标记为未核验。
+                logger.error(f"report grounding gate failed: {gate_error}")
+                report.grounding = {
+                    "verdict": "ungrounded",
+                    "error": f"grounding gate failed: {gate_error}",
+                }
+
             report.status = ReportStatus.COMPLETED
             report.completed_at = datetime.now().isoformat()
             
@@ -2540,7 +2639,8 @@ class ReportManager:
             markdown_content=markdown_content,
             created_at=data.get('created_at', ''),
             completed_at=data.get('completed_at', ''),
-            error=data.get('error')
+            error=data.get('error'),
+            grounding=data.get('grounding')
         )
     
     @classmethod
