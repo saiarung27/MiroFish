@@ -141,6 +141,51 @@ def test_search_scopes_and_ontology_recorded(client):
     assert recorded["entities"]["Cleaner"]["description"] == "a cleaning business"
 
 
+def test_set_ontology_accepts_zep_model_classes(client):
+    """Regression: GraphBuilderService passes EntityModel/EdgeModel CLASSES
+    (not dicts) to graph.set_ontology, with edges as (class,
+    [EntityEdgeSourceTarget]) tuples. Passing them through verbatim made
+    the adapter's json.dumps raise 'ModelMetaclass is not JSON
+    serializable' on every real graph build (both Oct 27 E2E tracks
+    failed at 15% progress); the facade must translate them to plain
+    JSON-safe dicts first."""
+    import warnings
+    from typing import Optional
+
+    from pydantic import Field
+    from zep_cloud import EntityEdgeSourceTarget
+    from zep_cloud.external_clients.ontology import EdgeModel, EntityModel, EntityText
+
+    warnings.filterwarnings("ignore", category=UserWarning, module="pydantic")
+    entity_cls = type("BeginnerInvestor", (EntityModel,), {
+        "__doc__": "A novice investor.",
+        "__annotations__": {"full_name": Optional[EntityText]},
+        "full_name": Field(description="The full name.", default=None),
+    })
+    edge_cls = type("SubscribesTo", (EdgeModel,), {
+        "__doc__": "A user subscribes to a service.",
+        "__annotations__": {"details": Optional[str]},
+        "details": Field(description="Additional details.", default=None),
+    })
+
+    client.graph.create(graph_id="g1")
+    client.graph.set_ontology(
+        graph_ids=["g1"],
+        entities={"BeginnerInvestor": entity_cls},
+        edges={"SUBSCRIBES_TO": (
+            edge_cls,
+            [EntityEdgeSourceTarget(source="Person", target="Organization")],
+        )},
+    )
+    recorded = client._adapter.get_ontology("g1")
+    entity = recorded["entities"]["BeginnerInvestor"]
+    assert entity["description"] == "A novice investor."
+    assert entity["attributes"]["full_name"]["description"] == "The full name."
+    edge = recorded["edges"]["SUBSCRIBES_TO"]
+    assert edge["source_targets"] == [{"source": "Person", "target": "Organization"}]
+    assert edge["attributes"]["details"]["description"] == "Additional details."
+
+
 def test_services_construct_without_key_under_reify(monkeypatch, tmp_path):
     from app import config as config_module
     from app.services.zep_entity_reader import ZepEntityReader

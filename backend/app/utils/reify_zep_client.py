@@ -38,7 +38,10 @@ Fidelity notes -- read before assuming Zep parity:
   measured Zep Cloud 3.25 behaviour documented in zep_entity_reader.
 * ``graph.set_ontology`` is recorded to a JSON sidecar per graph and
   NOT enforced: Reify's indexer does not constrain entities by
-  ontology. Same documented limitation as the adapter itself.
+  ontology. Same documented limitation as the adapter itself. The
+  facade translates the Zep SDK shapes GraphBuilderService actually
+  sends (EntityModel/EdgeModel CLASSES and (class, source-targets)
+  edge tuples) into plain JSON-safe dicts before recording.
 * Edge ids are deterministic ``edge-<sha1(source, relation, target)>``
   and carry no timestamps or episode lists (the adapter does not
   track edge provenance); ``episodes`` is ``[]``.
@@ -210,6 +213,59 @@ class _EdgeNamespace:
         )
 
 
+def _model_class_to_dict(cls: Any) -> dict[str, Any]:
+    """Translate one Zep ontology model to a JSON-safe record.
+
+    GraphBuilderService builds entity/edge types as dynamic Pydantic model
+    CLASSES (``type(name, (EntityModel,), attrs)``) and passes the classes
+    themselves to ``graph.set_ontology``; the Zep SDK serializes them, but
+    the Reify adapter records a JSON sidecar, so a class object here would
+    raise ``TypeError: Object of type ModelMetaclass is not JSON
+    serializable``. Plain dicts (used by tests and other callers) pass
+    through unchanged.
+    """
+    if isinstance(cls, dict):
+        return cls
+    fields: dict[str, Any] = {}
+    for name, field in getattr(cls, "model_fields", {}).items():
+        annotation = getattr(field, "annotation", None)
+        fields[name] = {
+            "description": getattr(field, "description", None),
+            "type": getattr(annotation, "__name__", str(annotation))
+            if annotation is not None
+            else None,
+        }
+    return {"description": getattr(cls, "__doc__", None), "attributes": fields}
+
+
+def _source_target_to_dict(st: Any) -> dict[str, Any]:
+    if isinstance(st, dict):
+        return st
+    return {"source": getattr(st, "source", None), "target": getattr(st, "target", None)}
+
+
+def _ontology_entities_to_dict(entities: dict[str, Any] | None) -> dict[str, Any]:
+    return {name: _model_class_to_dict(cls) for name, cls in (entities or {}).items()}
+
+
+def _ontology_edges_to_dict(edges: dict[str, Any] | None) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for name, value in (edges or {}).items():
+        if isinstance(value, dict):
+            out[name] = value
+            continue
+        if isinstance(value, tuple) and len(value) == 2:
+            edge_cls, source_targets = value
+            record = _model_class_to_dict(edge_cls)
+            record["source_targets"] = [
+                _source_target_to_dict(st) for st in (source_targets or [])
+            ]
+            out[name] = record
+            continue
+        out[name] = _model_class_to_dict(value)
+    return out
+
+
 class _GraphNamespace:
     def __init__(self, client: "ReifyZepClient") -> None:
         self._client = client
@@ -236,9 +292,20 @@ class _GraphNamespace:
         edges: dict[str, Any] | None = None,
         **_: Any,
     ) -> None:
+        # GraphBuilderService passes Zep SDK shapes, not plain data: entity
+        # values are dynamically created EntityModel CLASSES and edge values
+        # are (EdgeModel class, [EntityEdgeSourceTarget]) tuples. Those
+        # must be translated to plain dicts before the adapter's JSON
+        # sidecar write; passing them through verbatim raised "Object of
+        # type ModelMetaclass is not JSON serializable" on every real graph
+        # build (both Oct 27 E2E tracks hit it at 15% progress).
         for graph_id in graph_ids or []:
             self._client._adapter.set_ontology(
-                graph_id, {"entities": entities or {}, "edges": edges or {}}
+                graph_id,
+                {
+                    "entities": _ontology_entities_to_dict(entities),
+                    "edges": _ontology_edges_to_dict(edges),
+                },
             )
 
     def add(
