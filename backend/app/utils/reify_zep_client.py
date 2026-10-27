@@ -30,7 +30,12 @@ Fidelity notes -- read before assuming Zep parity:
 * ``graph.episode.get`` always reports ``processed=True``: Reify
   ingestion is synchronous, there is no async pipeline to poll.
 * ``batch.process`` is a no-op that succeeds: episodes are stored at
-  ``batch.add`` time. ``batch.get`` reports ``status="processed"``.
+  ``batch.add`` time. ``batch.get``/``batch.list`` report Zep's status
+  vocabulary (``"succeeded"`` once processed, else ``"draft"``) plus a
+  ``progress`` object (``percent_complete``/``succeeded_items``), because
+  GraphBuilderService's wait loop only treats Zep terminal states as
+  done; items carry ``status="succeeded"`` and a matching
+  ``source_uuid`` for the same reason.
 * ``graph.search`` is lexical (keyword overlap via Reify recall), not
   semantic, and the ``reranker`` argument is accepted but ignored.
   Zep's cross-encoder/RRF ranking has no local equivalent here.
@@ -382,9 +387,15 @@ class _BatchNamespace:
             metadata = _field(item, "metadata", {}) or {}
             chunk_index = metadata.get("chunk_index", len(batch["items"]))
             episode = self._client._adapter.add_episode(graph_id, data)
+            # Episodes are stored synchronously at add time, so each item
+            # is already succeeded; the wait loop in GraphBuilderService
+            # requires exactly this status (plus a matching source_uuid)
+            # on list_items, or it reports the batch as failed.
             record = {
                 "episode_uuid": episode["uuid"],
                 "sequence_index": chunk_index,
+                "status": "succeeded",
+                "source_uuid": episode["uuid"],
             }
             batch["items"].append(record)
             out.append(
@@ -412,11 +423,27 @@ class _BatchNamespace:
         batch = batches.get(batch_id)
         if batch is None:
             raise NotFoundError(f"batch {batch_id} not found")
+        # Report Zep's status vocabulary, not the internal one: the
+        # GraphBuilderService wait loop only treats {"succeeded",
+        # "partial", "failed", "invalid", "canceled"} as terminal, and
+        # reads progress.percent_complete / progress.succeeded_items.
+        # Reporting the internal "processed" status made the loop spin
+        # until its 600s timeout on every real graph build (Oct 27 E2E
+        # tracks stuck at "0/11 complete"), and the missing progress
+        # object is why it always showed 0 completed.
+        processed = batch["status"] == "processed"
         return AttrDict(
             {
                 "batch_id": batch_id,
                 "metadata": batch["metadata"],
-                "status": batch["status"],
+                "status": "succeeded" if processed else "draft",
+                "progress": AttrDict(
+                    {
+                        "percent_complete": 100.0 if processed else 0.0,
+                        "succeeded_items": len(batch["items"]) if processed else 0,
+                        "total_items": len(batch["items"]),
+                    }
+                ),
             }
         )
 
@@ -430,7 +457,11 @@ class _BatchNamespace:
         next_cursor = start + len(page) if start + len(page) < len(ordered) else None
         return _BatchPage(
             batches=[
-                AttrDict({"batch_id": bid, "metadata": b["metadata"], "status": b["status"]})
+                AttrDict({
+                    "batch_id": bid,
+                    "metadata": b["metadata"],
+                    "status": "succeeded" if b["status"] == "processed" else "draft",
+                })
                 for bid, b in page
             ],
             next_cursor=next_cursor,
@@ -453,6 +484,11 @@ class _BatchNamespace:
                     {
                         "episode_uuid": it["episode_uuid"],
                         "sequence_index": it["sequence_index"],
+                        # Older sidecars (written before items carried a
+                        # status) default to succeeded: the episode was
+                        # stored at add time, so that is the honest state.
+                        "status": it.get("status", "succeeded"),
+                        "source_uuid": it.get("source_uuid", it["episode_uuid"]),
                     }
                 )
                 for it in page

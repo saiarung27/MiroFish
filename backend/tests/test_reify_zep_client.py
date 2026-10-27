@@ -81,11 +81,18 @@ def test_batch_lifecycle_matches_graph_builder_contract(client):
     assert all(d.episode_uuid for d in details)
 
     client.batch.process(batch_id=batch.batch_id)
-    assert client.batch.get(batch_id=batch.batch_id).status == "processed"
+    # Zep vocabulary: a processed batch reports "succeeded" (a terminal
+    # state for GraphBuilderService's wait loop) plus a progress object.
+    summary = client.batch.get(batch_id=batch.batch_id)
+    assert summary.status == "succeeded"
+    assert summary.progress.percent_complete == 100.0
+    assert summary.progress.succeeded_items == 2
 
     page = client.batch.list_items(batch_id=batch.batch_id, limit=100, cursor=None)
     assert len(page.items) == 2
     assert page.next_cursor is None
+    assert all(it.status == "succeeded" for it in page.items)
+    assert all(it.source_uuid == it.episode_uuid for it in page.items)
 
     listing = client.batch.list(limit=100, cursor=None)
     matches = [
@@ -184,6 +191,53 @@ def test_set_ontology_accepts_zep_model_classes(client):
     edge = recorded["edges"]["SUBSCRIBES_TO"]
     assert edge["source_targets"] == [{"source": "Person", "target": "Organization"}]
     assert edge["attributes"]["details"]["description"] == "Additional details."
+
+
+def test_wait_for_batch_terminates_under_reify(monkeypatch, tmp_path):
+    """Regression: the build task's GraphBuilderService._wait_for_batch
+    polls batch.get until its status is a Zep terminal state and reads
+    progress.succeeded_items. The facade used to report the internal
+    "processed" status with no progress object, so the loop spun until
+    its 600s timeout on every real graph build (Oct 27 E2E tracks stuck
+    at "0/11 complete"). Driving the real wait loop must return at once
+    with the stored episodes' UUIDs."""
+    from app import config as config_module
+    from app.services.graph_builder import BatchSubmission, GraphBuilderService
+    from zep_cloud import BatchAddItem
+
+    monkeypatch.setenv("MIROFISH_MEMORY_BACKEND", "reify")
+    monkeypatch.setenv("MIROFISH_REIFY_ROOT", str(tmp_path / "graphs"))
+    monkeypatch.setattr(config_module.Config, "ZEP_API_KEY", "")
+    clear_zep_client_cache()
+    builder = GraphBuilderService(api_key="")
+    try:
+        builder.client.graph.create(graph_id="g1")
+        batch = builder.client.batch.create(
+            metadata={"mirofish_operation_id": "op-wait", "graph_id": "g1", "chunk_count": 2}
+        )
+        items = [
+            BatchAddItem(
+                type="graph_episode", graph_id="g1", data="Maya runs a solo crew in Charlotte.",
+                data_type="text", source_description="chunk",
+                metadata={"mirofish_operation_id": "op-wait", "chunk_index": 0},
+            ),
+            BatchAddItem(
+                type="graph_episode", graph_id="g1", data="Darnell worries about shared ZIP codes.",
+                data_type="text", source_description="chunk",
+                metadata={"mirofish_operation_id": "op-wait", "chunk_index": 1},
+            ),
+        ]
+        added = builder.client.batch.add(batch_id=batch.batch_id, items=items)
+        builder.client.batch.process(batch_id=batch.batch_id)
+        uuids = builder._wait_for_batch(
+            BatchSubmission(
+                batch_id=batch.batch_id, operation_id="op-wait",
+                episode_uuids=[d.episode_uuid for d in added], item_count=2,
+            )
+        )
+        assert uuids == [d.episode_uuid for d in added]
+    finally:
+        builder.client.close()
 
 
 def test_services_construct_without_key_under_reify(monkeypatch, tmp_path):
