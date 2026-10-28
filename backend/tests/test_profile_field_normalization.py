@@ -2,6 +2,7 @@ import csv
 import json
 
 from app.services.oasis_profile_generator import (
+    TWITTER_DISCUSSION_GUIDANCE,
     OasisAgentProfile,
     OasisProfileGenerator,
     _coerce_to_str,
@@ -69,7 +70,12 @@ def test_normalized_profile_serializes_to_twitter_and_reddit(tmp_path):
     reddit = json.loads(reddit_path.read_text(encoding="utf-8"))[0]
 
     assert twitter["description"] == "公开简介"
-    assert twitter["user_char"] == "公开简介 详细, 人设"
+    # Sim-design change (Oct 2026): user_char is bio + persona + the
+    # discussion-behavior block. The normalization contract (bio/persona
+    # preserved verbatim, in order) still holds as a prefix.
+    assert twitter["user_char"] == (
+        "公开简介 详细, 人设 " + TWITTER_DISCUSSION_GUIDANCE
+    )
     assert reddit["bio"] == "公开简介"
     assert reddit["persona"] == "详细, 人设"
     assert reddit["mbti"] == "ENFP"

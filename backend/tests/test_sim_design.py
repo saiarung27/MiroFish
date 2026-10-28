@@ -35,3 +35,41 @@ def test_twitter_available_actions_include_create_comment():
         module.ActionType.DO_NOTHING,
     ):
         assert action in actions
+
+
+import csv
+
+from app.services.oasis_profile_generator import (
+    TWITTER_DISCUSSION_GUIDANCE,
+    OasisAgentProfile,
+    OasisProfileGenerator,
+)
+
+
+def test_twitter_csv_user_char_carries_discussion_guidance(tmp_path):
+    # The stock OASIS Twitter system prompt only says "choose some
+    # actions", so agents default to do_nothing/like/bare repost. The
+    # guidance block in user_char (injected into the system prompt) is
+    # the in-repo lever that makes opinionated discussion the default.
+    generator = OasisProfileGenerator.__new__(OasisProfileGenerator)
+    profile = OasisAgentProfile(
+        user_id=0,
+        user_name="maya",
+        name="Maya Chen",
+        bio="29-year-old beginner investor, checks phone at lunch.",
+        persona="Cautious, afraid of dumb mistakes, wants plain language.",
+    )
+    out = tmp_path / "twitter_profiles.csv"
+    generator._save_twitter_csv([profile], str(out))
+    with open(out, newline="", encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+    assert len(rows) == 1
+    row = rows[0]
+    assert "29-year-old beginner investor" in row["user_char"]
+    assert "afraid of dumb mistakes" in row["user_char"]
+    assert TWITTER_DISCUSSION_GUIDANCE in row["user_char"]
+    assert "create_comment" in row["user_char"]
+    assert "quote_post" in row["user_char"]
+    # Guidance is internal: the public description stays the plain bio.
+    assert row["description"] == "29-year-old beginner investor, checks phone at lunch."
+    assert "Discussion behavior" not in row["description"]

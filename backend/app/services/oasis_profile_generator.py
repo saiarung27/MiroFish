@@ -31,6 +31,26 @@ from .zep_entity_reader import EntityNode, ZepEntityReader
 
 logger = get_logger('mirofish.oasis_profile')
 
+# Discussion behavior appended to every Twitter agent's user_char (the text
+# OASIS injects verbatim into the agent's system prompt). Root cause it
+# addresses: the stock OASIS Twitter system prompt only says "choose some
+# actions", so agents default to the lowest-effort actions (do_nothing,
+# like, bare repost) and never discuss. This block makes opinionated
+# discussion the agent's default behavior. It is character instruction,
+# not output text; if an agent parrots its phrasing into a post, the
+# sim-design opinion counter treats that post as non-opinion.
+TWITTER_DISCUSSION_GUIDANCE = (
+    "Discussion behavior: You are an opinionated social media user, not a "
+    "news repeater. When you see posts about the product or topic, say what "
+    "YOU think in your own words: agree or disagree and give a reason from "
+    "your own situation (price, trust, spam, privacy, or broker-app "
+    "alternatives). Prefer replying with create_comment and quote_post with "
+    "your own take over a bare repost: a repost with nothing added says "
+    "nothing. Ask follow-up questions when something is unclear (what price "
+    "is fair? what proof would convince you?). Never copy another post's "
+    "wording; always write original sentences."
+)
+
 
 def _coerce_to_str(value: Any) -> str:
     """Coerce a value to a plain string.
@@ -1151,6 +1171,11 @@ class OasisProfileGenerator:
                 user_char = profile.bio
                 if profile.persona and profile.persona != profile.bio:
                     user_char = f"{profile.bio} {profile.persona}"
+                # Discussion behavior: without this, agents default to
+                # do_nothing/like/bare repost (see TWITTER_DISCUSSION_GUIDANCE).
+                # Twitter-only: Reddit profiles carry persona directly and
+                # the Reddit script already enables comments.
+                user_char = f"{user_char} {TWITTER_DISCUSSION_GUIDANCE}"
                 # 处理换行符（CSV中用空格替代）
                 user_char = user_char.replace('\n', ' ').replace('\r', ' ')
                 
