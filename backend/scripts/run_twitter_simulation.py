@@ -388,12 +388,19 @@ class TwitterSimulationRunner:
     # Twitter可用动作（不包含INTERVIEW，INTERVIEW只能通过ManualAction手动触发）
     AVAILABLE_ACTIONS = [
         ActionType.CREATE_POST,
+        ActionType.CREATE_COMMENT,
         ActionType.LIKE_POST,
         ActionType.REPOST,
         ActionType.FOLLOW,
         ActionType.DO_NOTHING,
         ActionType.QUOTE_POST,
     ]
+    # NOTE: CREATE_COMMENT was missing here until the Oct 2026 sim-design
+    # work. Without it, Twitter runs structurally cannot produce comments
+    # (every run showed exactly 0), while the Reddit script already
+    # includes it. Comments are report evidence (sim_posts reads the
+    # comment table) even though OASIS feeds show posts only, so they
+    # cannot cascade into replies the way quote_post can.
     
     def __init__(self, config_path: str, wait_for_commands: bool = True):
         """
