@@ -100,3 +100,39 @@ def test_event_config_prompt_requires_debate_seeds():
     assert "narrative_direction" in prompt
     assert "initial_posts" in prompt
     assert "reasoning" in prompt
+
+
+from app.services.report_agent import ReportAgent
+
+
+def _parser():
+    # _parse_tool_calls only uses the VALID_TOOL_NAMES class attribute
+    # (via _is_valid_tool_call), so no LLM/graph init is needed.
+    return ReportAgent.__new__(ReportAgent)
+
+
+def test_tool_call_parser_validates_xml_format_calls():
+    agent = _parser()
+    # "tool"/"params" keys normalize to "name"/"parameters".
+    calls = agent._parse_tool_calls(
+        'Action: I will call a tool.\n'
+        '<tool_call>{"tool": "sim_posts", "params": {"limit": 5}}</tool_call>'
+    )
+    assert calls == [{"name": "sim_posts", "parameters": {"limit": 5}}]
+    # Standard "name" calls still pass through unchanged.
+    calls = agent._parse_tool_calls(
+        '<tool_call>{"name": "sim_posts", "parameters": {"limit": 5}}</tool_call>'
+    )
+    assert calls == [{"name": "sim_posts", "parameters": {"limit": 5}}]
+
+
+def test_tool_call_parser_drops_nameless_or_unknown_xml_calls():
+    agent = _parser()
+    # A nameless object must never reach the section loop's call['name']
+    # indexing (that KeyError killed report_b29df4d49c29 outright).
+    assert agent._parse_tool_calls(
+        '<tool_call>{"parameters": {"limit": 5}}</tool_call>'
+    ) == []
+    assert agent._parse_tool_calls(
+        '<tool_call>{"name": "not_a_tool", "parameters": {}}</tool_call>'
+    ) == []

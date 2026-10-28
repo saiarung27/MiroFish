@@ -1131,11 +1131,20 @@ class ReportAgent:
         tool_calls = []
 
         # 格式1: XML风格（标准格式）
+        # NOTE (Oct 2026 sim-design validation): this path used to append
+        # parsed calls WITHOUT validation, while formats 2/3 validate via
+        # _is_valid_tool_call. An LLM emitting {"tool": ...} keys or a
+        # nameless object here reached the section loop's call['name']
+        # indexing and killed the whole report with KeyError 'name'
+        # (report_b29df4d49c29, section 1, iteration 4). Validate and
+        # normalize format-1 calls exactly like the other formats, so
+        # _parse_tool_calls only ever returns valid, normalized calls.
         xml_pattern = r'<tool_call>\s*(\{.*?\})\s*</tool_call>'
         for match in re.finditer(xml_pattern, response, re.DOTALL):
             try:
                 call_data = json.loads(match.group(1))
-                tool_calls.append(call_data)
+                if isinstance(call_data, dict) and self._is_valid_tool_call(call_data):
+                    tool_calls.append(call_data)
             except json.JSONDecodeError:
                 pass
 
