@@ -682,8 +682,14 @@ class SimulationConfigGenerator:
    - 种子必须持有不同立场：至少一条热情支持、一条怀疑、一条聚焦价格、一条
      与现有免费替代品比较。每条用第一人称写，像出自世界里不同的人，1-3句话，
      帖子长度。
-   - 每条种子都必须指定 poster_type（从上述"可用实体类型"中选择），以便分配
-     给合适的 agent。
+   - 每条种子都必须指定 poster_type，以便分配给合适的 agent。
+     poster_type 必须是"可用实体类型"列表中冒号前面的类型名原文
+     （copy the type token exactly — never a person's name, never a product name）。
+     类型名后面的示例名字只是例子，绝不能用作
+     poster_type（例如绝不能写 Aisha Khan、Market Pulse Alerts）。
+     原因：名字无法匹配任何 agent 类型时，所有种子都会 fallback 到
+     同一个最高影响力 agent（2026-10-28 rerun：6 条种子全部分配给
+     agent 1），而旧的初始帖子发布逻辑会丢弃同 agent 的多余种子。
    - 所有种子帖子都用英文写（Write all seed posts in English）。
 
 **重要**：poster_type 必须从上述"可用实体类型"中选择，示例中的类型名仅供参考，实际可用类型以列表为准，这样初始帖子才能分配给合适的 Agent 发布。

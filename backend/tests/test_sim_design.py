@@ -182,3 +182,16 @@ def test_group_initial_actions_skips_unresolvable_agents():
     )
     assert actions == {}
     assert len(skipped) == 1 and skipped[0][0] == 9
+
+
+def test_event_config_prompt_requires_type_token_poster_type():
+    # The Oct 2026 rerun's LLM copied example NAMES (Aisha Khan, Market
+    # Pulse Alerts) into poster_type instead of type tokens, so every
+    # seed fell back to the same highest-influence agent.
+    prompt = SimulationConfigGenerator._build_event_config_prompt(
+        simulation_requirement="Debate a Telegram stock-alert bot launch.",
+        context_truncated="MoveLensAlertBot offers DM alerts and briefings.",
+        type_info="- PriceSensitiveSaver: Aisha Khan",
+    )
+    assert "never a person's name" in prompt
+    assert "never a product name" in prompt
