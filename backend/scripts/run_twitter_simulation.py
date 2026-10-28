@@ -382,6 +382,45 @@ class IPCHandler:
             return True
 
 
+def group_initial_actions(initial_posts, get_agent):
+    """Group seed posts by agent for a single env.step call.
+
+    OASIS env.step accepts a list of actions per agent, so seeds sharing
+    one agent must accumulate, not overwrite. The old code assigned
+    ``initial_actions[agent] = ...`` unconditionally, keeping only the
+    LAST seed per agent — in the Oct 2026 sim-design rerun all 6 seeds
+    were assigned to agent 1 (highest-influence fallback) and only the
+    announcement posted, so the 5 debate seeds never reached the feed
+    and price/spam/broker debate never happened. This mirrors the Reddit
+    script, which already list-appends on collision.
+
+    Returns (actions, skipped): actions maps agent -> ManualAction or
+    list[ManualAction]; skipped lists (agent_id, error) for agents that
+    could not be resolved.
+    """
+    actions = {}
+    skipped = []
+    for post in initial_posts:
+        agent_id = post.get("poster_agent_id", 0)
+        content = post.get("content", "")
+        try:
+            agent = get_agent(agent_id)
+        except Exception as e:
+            skipped.append((agent_id, str(e)))
+            continue
+        action = ManualAction(
+            action_type=ActionType.CREATE_POST,
+            action_args={"content": content},
+        )
+        if agent in actions:
+            if not isinstance(actions[agent], list):
+                actions[agent] = [actions[agent]]
+            actions[agent].append(action)
+        else:
+            actions[agent] = action
+    return actions, skipped
+
+
 class TwitterSimulationRunner:
     """Twitter模拟运行器"""
     
@@ -616,22 +655,19 @@ class TwitterSimulationRunner:
         
         if initial_posts:
             print(f"执行初始事件 ({len(initial_posts)}条初始帖子)...")
-            initial_actions = {}
-            for post in initial_posts:
-                agent_id = post.get("poster_agent_id", 0)
-                content = post.get("content", "")
-                try:
-                    agent = self.env.agent_graph.get_agent(agent_id)
-                    initial_actions[agent] = ManualAction(
-                        action_type=ActionType.CREATE_POST,
-                        action_args={"content": content}
-                    )
-                except Exception as e:
-                    print(f"  警告: 无法为Agent {agent_id}创建初始帖子: {e}")
-            
+            initial_actions, skipped = group_initial_actions(
+                initial_posts, self.env.agent_graph.get_agent
+            )
+            for agent_id, error in skipped:
+                print(f"  警告: 无法为Agent {agent_id}创建初始帖子: {error}")
+
             if initial_actions:
                 await self.env.step(initial_actions)
-                print(f"  已发布 {len(initial_actions)} 条初始帖子")
+                posted = sum(
+                    len(v) if isinstance(v, list) else 1
+                    for v in initial_actions.values()
+                )
+                print(f"  已发布 {posted} 条初始帖子")
         
         # 主模拟循环
         print("\n开始模拟循环...")

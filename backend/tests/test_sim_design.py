@@ -136,3 +136,49 @@ def test_tool_call_parser_drops_nameless_or_unknown_xml_calls():
     assert agent._parse_tool_calls(
         '<tool_call>{"name": "not_a_tool", "parameters": {}}</tool_call>'
     ) == []
+
+
+def test_group_initial_actions_keeps_every_seed_for_one_agent():
+    # Regression for the Oct 2026 rerun: all 6 seeds were assigned to
+    # agent 1 and the old dict assignment kept only the last one, so
+    # the 5 debate seeds never reached the feed.
+    module = _load_twitter_runner_module()
+    agents = {}
+
+    def get_agent(agent_id):
+        if agent_id not in agents:
+            agents[agent_id] = object()
+        return agents[agent_id]
+
+    posts = [
+        {"poster_agent_id": 1, "content": "seed one"},
+        {"poster_agent_id": 1, "content": "seed two"},
+        {"poster_agent_id": 1, "content": "seed three"},
+        {"poster_agent_id": 2, "content": "other agent seed"},
+    ]
+    actions, skipped = module.group_initial_actions(posts, get_agent)
+    assert skipped == []
+    assert len(actions) == 2
+    shared = actions[agents[1]]
+    assert isinstance(shared, list) and len(shared) == 3
+    assert [a.action_args["content"] for a in shared] == [
+        "seed one",
+        "seed two",
+        "seed three",
+    ]
+    solo = actions[agents[2]]
+    assert not isinstance(solo, list)
+    assert solo.action_args["content"] == "other agent seed"
+
+
+def test_group_initial_actions_skips_unresolvable_agents():
+    module = _load_twitter_runner_module()
+
+    def get_agent(agent_id):
+        raise ValueError("no such agent")
+
+    actions, skipped = module.group_initial_actions(
+        [{"poster_agent_id": 9, "content": "x"}], get_agent
+    )
+    assert actions == {}
+    assert len(skipped) == 1 and skipped[0][0] == 9
