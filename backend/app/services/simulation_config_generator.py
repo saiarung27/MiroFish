@@ -645,9 +645,63 @@ class SimulationConfigGenerator:
             peak_activity_multiplier=1.5
         )
     
+    @staticmethod
+    def _build_event_config_prompt(
+        simulation_requirement: str,
+        context_truncated: str,
+        type_info: str,
+    ) -> str:
+        """Build the event-config LLM prompt.
+
+        Extracted as a pure function so tests can assert the seed-design
+        requirements without calling an LLM. The seed rules below are the
+        core of the Oct 2026 sim-design work: the previous prompt asked
+        for "initial posts" with no stance/question requirement, so seeds
+        were announcements the crowd could only echo. Seeds must now
+        CREATE DISCUSSION — questions and trade-offs from different
+        stances — or the rerun cannot produce opinions to report.
+        """
+        return f"""请根据以下模拟需求和背景信息，生成模拟配置参数：
+
+模拟需求：{simulation_requirement}
+
+{context_truncated}
+
+## 可用实体类型及示例
+{type_info}
+
+## 任务
+生成以下配置参数：
+1. 提取热点话题关键词（hot_topics）：从背景中提取5-10个核心话题词
+2. 舆论引导方向（narrative_direction）：用一句话描述舆论的整体走向
+3. 初始帖子（initial_posts）：模拟开始时发布的种子帖子 — 这些帖子是模拟人群
+   做出反应的起点，因此它们必须制造讨论，而不是只做宣告：
+   - 写4-6条种子帖子，其中恰好一条可以是产品/话题的 plain announcement；
+     其余每一条都必须以一个问题结尾，或提出一个两难权衡（例如：价格 vs 免费
+     替代品、信任 vs 过往记录、隐私 vs 骚扰、便利 vs 控制）。
+   - 种子必须持有不同立场：至少一条热情支持、一条怀疑、一条聚焦价格、一条
+     与现有免费替代品比较。每条用第一人称写，像出自世界里不同的人，1-3句话，
+     帖子长度。
+   - 每条种子都必须指定 poster_type（从上述"可用实体类型"中选择），以便分配
+     给合适的 agent。
+   - 所有种子帖子都用英文写（Write all seed posts in English）。
+
+**重要**：poster_type 必须从上述"可用实体类型"中选择，示例中的类型名仅供参考，实际可用类型以列表为准，这样初始帖子才能分配给合适的 Agent 发布。
+例如：官方声明应由 Official/University 类型发布，新闻由 MediaOutlet 发布，学生观点由 Student 发布。
+
+返回JSON格式（不要markdown）：
+{{
+    "hot_topics": ["话题1", "话题2"],
+    "narrative_direction": "舆论方向描述",
+    "initial_posts": [
+        {{"content": "帖子内容", "poster_type": "类型名"}}
+    ],
+    "reasoning": "生成理由"
+}}"""
+
     def _generate_event_config(
-        self, 
-        context: str, 
+        self,
+        context: str,
         simulation_requirement: str,
         entities: List[EntityNode]
     ) -> Dict[str, Any]:
@@ -675,34 +729,11 @@ class SimulationConfigGenerator:
         # 使用配置的上下文截断长度
         context_truncated = context[:self.EVENT_CONFIG_CONTEXT_LENGTH]
         
-        prompt = f"""基于以下模拟需求，生成事件配置。
-
-模拟需求: {simulation_requirement}
-
-{context_truncated}
-
-## 可用实体类型及示例
-{type_info}
-
-## 任务
-请生成事件配置JSON：
-- 提取热点话题关键词
-- 描述舆论发展方向
-- 设计初始帖子内容，**每个帖子必须指定 poster_type（发布者类型）**
-
-**重要**: poster_type 必须从上面的"可用实体类型"中选择，这样初始帖子才能分配给合适的 Agent 发布。
-例如：官方声明应由 Official/University 类型发布，新闻由 MediaOutlet 发布，学生观点由 Student 发布。
-
-返回JSON格式（不要markdown）：
-{{
-    "hot_topics": ["关键词1", "关键词2", ...],
-    "narrative_direction": "<舆论发展方向描述>",
-    "initial_posts": [
-        {{"content": "帖子内容", "poster_type": "实体类型（必须从可用类型中选择）"}},
-        ...
-    ],
-    "reasoning": "<简要说明>"
-}}"""
+        prompt = self._build_event_config_prompt(
+            simulation_requirement=simulation_requirement,
+            context_truncated=context_truncated,
+            type_info=type_info,
+        )
 
         system_prompt = "你是舆论分析专家。返回纯JSON格式。注意 poster_type 必须精确匹配可用实体类型。"
         system_prompt = f"{system_prompt}\n\n{get_language_instruction()}\nIMPORTANT: The 'poster_type' field value MUST be in English PascalCase exactly matching the available entity types. Only 'content', 'narrative_direction', 'hot_topics' and 'reasoning' fields should use the specified language."
