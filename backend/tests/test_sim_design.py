@@ -195,3 +195,46 @@ def test_event_config_prompt_requires_type_token_poster_type():
     )
     assert "never a person's name" in prompt
     assert "never a product name" in prompt
+
+
+from app.services.simulation_config_generator import (
+    AgentActivityConfig,
+    EventConfig,
+)
+
+
+def test_seed_assignment_matches_entity_names():
+    # The LLM emits persona/product NAMES in poster_type even when told
+    # to use type tokens (final config: all 4 seeds were names). Without
+    # name matching they all fell back to the highest-influence agent.
+    gen = SimulationConfigGenerator.__new__(SimulationConfigGenerator)
+    agents = [
+        AgentActivityConfig(
+            agent_id=0, entity_uuid="u0", entity_name="MoveLensAlertBot",
+            entity_type="topic", influence_weight=9.0,
+        ),
+        AgentActivityConfig(
+            agent_id=1, entity_uuid="u1", entity_name="Aisha Khan",
+            entity_type="PriceSensitiveSaver", influence_weight=1.0,
+        ),
+        AgentActivityConfig(
+            agent_id=2, entity_uuid="u2", entity_name="Sara Lindqvist",
+            entity_type="TechWorker", influence_weight=1.0,
+        ),
+        AgentActivityConfig(
+            agent_id=3, entity_uuid="u3", entity_name="Tom Alvarez",
+            entity_type="DividendInvestor", influence_weight=1.0,
+        ),
+    ]
+    event = EventConfig(initial_posts=[
+        {"content": "price?", "poster_type": "Aisha Khan"},
+        {"content": "broker?", "poster_type": "Sara Lindqvist"},
+        {"content": "token", "poster_type": "DividendInvestor"},
+        {"content": "unknown", "poster_type": "NoSuchType"},
+    ])
+    out = gen._assign_initial_post_agents(event, agents)
+    assigned = [p["poster_agent_id"] for p in out.initial_posts]
+    assert assigned[0] == 1  # name match, not highest-influence agent 0
+    assert assigned[1] == 2  # name match
+    assert assigned[2] == 3  # type-token match still works
+    assert assigned[3] == 0  # fallback only for genuinely unknown types

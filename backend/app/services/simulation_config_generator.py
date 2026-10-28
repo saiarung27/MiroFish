@@ -784,6 +784,16 @@ class SimulationConfigGenerator:
             if etype not in agents_by_type:
                 agents_by_type[etype] = []
             agents_by_type[etype].append(agent)
+
+        # 按实体名建立 agent 索引。LLM 在 poster_type 里天然输出人名/
+        # 产品名（"Aisha Khan"、"Market Pulse Alerts"），即使提示要求用
+        # 类型名（2026-10-28 final 配置：4 条种子仍全是名字）。没有名
+        # 匹配时它们全部 fallback 到最高影响力 agent，种子失去人设声音。
+        agents_by_name: Dict[str, AgentActivityConfig] = {}
+        for agent in agent_configs:
+            key = (agent.entity_name or "").strip().lower()
+            if key and key not in agents_by_name:
+                agents_by_name[key] = agent
         
         # 类型映射表（处理 LLM 可能输出的不同格式）
         type_aliases = {
@@ -802,20 +812,25 @@ class SimulationConfigGenerator:
         
         updated_posts = []
         for post in event_config.initial_posts:
-            poster_type = post.get("poster_type", "").lower()
+            poster_type = post.get("poster_type", "").strip().lower()
             content = post.get("content", "")
-            
+
             # 尝试找到匹配的 agent
             matched_agent_id = None
-            
+
+            # 0. 按实体名匹配（优先：人名/产品名是最常见的 LLM 输出）
+            if poster_type in agents_by_name:
+                matched_agent_id = agents_by_name[poster_type].agent_id
+
             # 1. 直接匹配
-            if poster_type in agents_by_type:
+            if matched_agent_id is None and poster_type in agents_by_type:
                 agents = agents_by_type[poster_type]
                 idx = used_indices.get(poster_type, 0) % len(agents)
                 matched_agent_id = agents[idx].agent_id
                 used_indices[poster_type] = idx + 1
-            else:
-                # 2. 使用别名匹配
+
+            # 2. 使用别名匹配（仅当名匹配与直接匹配都未命中时）
+            if matched_agent_id is None:
                 for alias_key, aliases in type_aliases.items():
                     if poster_type in aliases or alias_key == poster_type:
                         for alias in aliases:
